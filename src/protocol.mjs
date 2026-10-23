@@ -24,6 +24,13 @@ const unavailableIssue = (issue) =>
   fields(issue, ["code"]) &&
   issue.code === "deleted-display-name-page-unavailable";
 
+function arrayOf(value, accepts) {
+  if (!Array.isArray(value)) return false;
+  // Iteration visits empty slots as undefined; Array#every skips them.
+  for (const item of value) if (!accepts(item)) return false;
+  return true;
+}
+
 export function snapshot(value) {
   if (
     !fields(value, ["status", "members", "fetchedAt", "issue"]) ||
@@ -32,8 +39,7 @@ export function snapshot(value) {
     return false;
   if (value.status === "available")
     return (
-      Array.isArray(value.members) &&
-      value.members.every(identifier) &&
+      arrayOf(value.members, identifier) &&
       (value.issue === undefined || missingIssue(value.issue))
     );
   return (
@@ -64,7 +70,6 @@ export function user(value) {
 }
 
 export function storedValue(entry, name) {
-  if (entry === undefined) return undefined;
   if (!record(entry) || !Number.isSafeInteger(entry.version))
     throw new RelationshipStoreError(
       "corrupt-data",
@@ -97,15 +102,15 @@ function requireInput(condition) {
 export function queryEntries(query) {
   requireInput(fields(query, ["relationships", "users"]));
   const { relationships = [], users = [] } = query;
-  requireInput(Array.isArray(relationships) && Array.isArray(users));
   requireInput(
-    relationships.every(
+    arrayOf(
+      relationships,
       (key) =>
         Array.isArray(key) &&
         key.length === 2 &&
         identifier(key[0]) &&
         direction(key[1]),
-    ) && users.every(identifier),
+    ) && arrayOf(users, identifier),
   );
   return [
     ...relationships.map(([id, kind]) => ({

@@ -29,6 +29,26 @@ function storageError(error) {
   );
 }
 
+// A get() result of undefined can mean either no key or an invalid stored
+// value. Resolve that ambiguity in the same transaction before validating.
+function readRecord(store, key, accept, fail) {
+  const request = store.get(key);
+  request.onsuccess = () => {
+    const finish = (exists) => {
+      try {
+        accept(exists ? storedValue(request.result, store.name) : undefined);
+      } catch (error) {
+        fail(error);
+      }
+    };
+    if (request.result !== undefined) finish(true);
+    else {
+      const existence = store.getKey(key);
+      existence.onsuccess = () => finish(existence.result !== undefined);
+    }
+  };
+}
+
 function transact(indexedDB, mode, operation, signal) {
   signal?.throwIfAborted();
   return new Promise((resolve, reject) => {
@@ -174,20 +194,19 @@ export function createRelationshipStore({ indexedDB }) {
         (transaction, fail) => {
           const result = { relationships: dictionary(), users: dictionary() };
           for (const { name, key } of entries) {
-            const request = transaction.objectStore(name).get(key);
-            request.onsuccess = () => {
-              try {
-                const value = storedValue(request.result, name);
+            readRecord(
+              transaction.objectStore(name),
+              key,
+              (value) => {
                 if (value === undefined) return;
                 if (name === "relationships") {
                   const [id, direction] = key;
                   result.relationships[id] ??= dictionary();
                   result.relationships[id][direction] = value;
                 } else result.users[key] = value;
-              } catch (error) {
-                fail(error);
-              }
-            };
+              },
+              fail,
+            );
           }
           return result;
         },
@@ -210,16 +229,15 @@ export function createRelationshipStore({ indexedDB }) {
         (transaction, fail) => {
           const merge = (name, key, value) => {
             const store = transaction.objectStore(name);
-            const request = store.get(key);
-            request.onsuccess = () => {
-              try {
-                const previous = storedValue(request.result, name);
+            readRecord(
+              store,
+              key,
+              (previous) => {
                 if (!previous || value.fetchedAt >= previous.fetchedAt)
                   store.put({ version: 1, value }, key);
-              } catch (error) {
-                fail(error);
-              }
-            };
+              },
+              fail,
+            );
           };
           for (const { name, key, value } of entries) merge(name, key, value);
         },

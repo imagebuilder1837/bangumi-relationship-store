@@ -78,6 +78,48 @@ test("only protocol observations are accepted and an invalid batch changes nothi
   );
 });
 
+test("sparse member arrays reject the entire batch without poisoning existing observations", async () => {
+  const store = createRelationshipStore({ indexedDB: new IDBFactory() });
+  await store.commit(batch(available(["old"])));
+  await assert.rejects(
+    store.commit({
+      relationships: {
+        alice: { friends: available(["replacement"], 2) },
+        bob: { friends: available(new Array(1), 2) },
+      },
+      users: { alice: { name: "Changed", avatar: "", fetchedAt: 2 } },
+    }),
+    { code: "invalid-input" },
+  );
+  const result = await store.read({
+    relationships: [
+      ["alice", "friends"],
+      ["bob", "friends"],
+    ],
+    users: ["alice"],
+  });
+  assert.deepEqual(result.relationships.alice.friends.members, ["old"]);
+  assert.equal(result.relationships.bob, undefined);
+  assert.equal(result.users.alice.name, "Alice");
+});
+
+test("sparse queries and damaged sparse records report their errors rather than becoming unknown", async () => {
+  const indexedDB = new IDBFactory();
+  const store = createRelationshipStore({ indexedDB });
+  for (const invalid of [
+    { relationships: new Array(1) },
+    { users: new Array(1) },
+  ])
+    await assert.rejects(store.read(invalid), { code: "invalid-input" });
+  await seed(indexedDB, {
+    value: { version: 1, value: available(new Array(1)) },
+  });
+  await assert.rejects(store.read(query), { code: "corrupt-data" });
+  await assert.rejects(store.commit(batch(available([]))), {
+    code: "corrupt-data",
+  });
+});
+
 test("damaged and newer records cannot be mistaken for unknown or overwritten", async () => {
   for (const [value, code] of [
     [
@@ -100,6 +142,46 @@ test("damaged and newer records cannot be mistaken for unknown or overwritten", 
       [],
     );
     await assert.rejects(store.read(query), { code });
+  }
+});
+
+test("an existing undefined record is corruption, not a missing key, and a write cannot repair it", async () => {
+  for (const target of [
+    { store: "relationships", key: ["alice", "friends"] },
+    { store: "users", key: "alice" },
+  ]) {
+    const indexedDB = new IDBFactory();
+    const store = createRelationshipStore({ indexedDB });
+    await store.commit({
+      relationships: { bob: { friends: available(["old"]) } },
+    });
+    await seed(indexedDB, { ...target, value: undefined });
+    await assert.rejects(store.read(query), { code: "corrupt-data" });
+    await assert.rejects(
+      store.commit({
+        ...batch(available(["replacement"], 2)),
+        relationships: {
+          alice: { friends: available(["replacement"], 2) },
+          bob: { friends: available(["changed"], 2) },
+        },
+      }),
+      { code: "corrupt-data" },
+    );
+    await assert.rejects(store.read(query), { code: "corrupt-data" });
+    assert.deepEqual(
+      (await store.read({ relationships: [["bob", "friends"]] })).relationships
+        .bob.friends.members,
+      ["old"],
+    );
+    assert.deepEqual(
+      (
+        await store.read({
+          relationships: [["missing", "friends"]],
+          users: ["missing"],
+        })
+      ).relationships,
+      Object.create(null),
+    );
   }
 });
 
