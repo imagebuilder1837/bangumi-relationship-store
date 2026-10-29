@@ -22,6 +22,30 @@ const query = {
   users: ["alice", "unknown"],
 };
 
+test("a later commit replaces newer observations without reading existing records", async () => {
+  const indexedDB = new IDBFactory();
+  const reader = createRelationshipStore({ indexedDB });
+  await reader.commit(batch(available(["newer"], 10)));
+  const writer = createRelationshipStore({
+    indexedDB: intercept(indexedDB, (transaction, mode) => {
+      if (mode !== "readwrite") return;
+      const objectStore = transaction.objectStore.bind(transaction);
+      transaction.objectStore = (...args) => {
+        const target = objectStore(...args);
+        target.get = target.getKey = () => {
+          throw new Error("write must not read");
+        };
+        return target;
+      };
+    }),
+  });
+  await writer.commit(batch(available(["older"], 1)));
+  assert.deepEqual(
+    (await reader.read(query)).relationships.alice.friends.members,
+    ["older"],
+  );
+});
+
 test("independent consumers share observations, distinguish unknown from empty, and cannot mutate stored results", async () => {
   const indexedDB = new IDBFactory();
   const writer = createRelationshipStore({ indexedDB });
@@ -115,12 +139,14 @@ test("sparse queries and damaged sparse records report their errors rather than 
     value: { version: 1, value: available(new Array(1)) },
   });
   await assert.rejects(store.read(query), { code: "corrupt-data" });
-  await assert.rejects(store.commit(batch(available([]))), {
-    code: "corrupt-data",
-  });
+  await store.commit(batch(available([])));
+  assert.deepEqual(
+    (await store.read(query)).relationships.alice.friends.members,
+    [],
+  );
 });
 
-test("damaged and newer records cannot be mistaken for unknown or overwritten", async () => {
+test("reads reject damaged and newer records while explicit commits replace them", async () => {
   for (const [value, code] of [
     [
       { version: 1, value: { status: "available", fetchedAt: 1 } },
@@ -132,20 +158,21 @@ test("damaged and newer records cannot be mistaken for unknown or overwritten", 
     await seed(indexedDB, { value });
     const store = createRelationshipStore({ indexedDB });
     await assert.rejects(store.read(query), { code });
-    await assert.rejects(store.commit(batch(available(["replacement"], 2))), {
-      code,
-    });
+    await store.commit(batch(available(["replacement"], 2)));
     await store.commit({ relationships: { bob: { friends: available([]) } } });
     assert.deepEqual(
       (await store.read({ relationships: [["bob", "friends"]] })).relationships
         .bob.friends.members,
       [],
     );
-    await assert.rejects(store.read(query), { code });
+    assert.deepEqual(
+      (await store.read(query)).relationships.alice.friends.members,
+      ["replacement"],
+    );
   }
 });
 
-test("an existing undefined record is corruption, not a missing key, and a write cannot repair it", async () => {
+test("reads distinguish undefined records from unknown keys and explicit commits replace them", async () => {
   for (const target of [
     { store: "relationships", key: ["alice", "friends"] },
     { store: "users", key: "alice" },
@@ -157,21 +184,21 @@ test("an existing undefined record is corruption, not a missing key, and a write
     });
     await seed(indexedDB, { ...target, value: undefined });
     await assert.rejects(store.read(query), { code: "corrupt-data" });
-    await assert.rejects(
-      store.commit({
-        ...batch(available(["replacement"], 2)),
-        relationships: {
-          alice: { friends: available(["replacement"], 2) },
-          bob: { friends: available(["changed"], 2) },
-        },
-      }),
-      { code: "corrupt-data" },
+    await store.commit({
+      ...batch(available(["replacement"], 2)),
+      relationships: {
+        alice: { friends: available(["replacement"], 2) },
+        bob: { friends: available(["changed"], 2) },
+      },
+    });
+    assert.deepEqual(
+      (await store.read(query)).relationships.alice.friends.members,
+      ["replacement"],
     );
-    await assert.rejects(store.read(query), { code: "corrupt-data" });
     assert.deepEqual(
       (await store.read({ relationships: [["bob", "friends"]] })).relationships
         .bob.friends.members,
-      ["old"],
+      ["changed"],
     );
     assert.deepEqual(
       (
@@ -347,7 +374,7 @@ test("property-like usernames and duplicate members remain safe across consumers
   assert.equal(result.users.constructor.name, "Constructor");
 });
 
-test("profile observation time is independent and queued input is detached from caller mutation", async () => {
+test("queued input is detached from caller mutation even when replacing newer profiles", async () => {
   const indexedDB = new IDBFactory();
   const store = createRelationshipStore({ indexedDB });
   await store.commit({
@@ -360,10 +387,10 @@ test("profile observation time is independent and queued input is detached from 
   await pending;
   const result = await store.read(query);
   assert.deepEqual(result.relationships.alice.friends.members, ["bob"]);
-  assert.equal(result.users.alice.name, "Fresh");
+  assert.equal(result.users.alice.name, "Alice");
 });
 
-test("concurrent batches merge independent directions and replace rather than union by observation time", async () => {
+test("concurrent batches preserve independent directions and replace by commit order", async () => {
   const indexedDB = new IDBFactory();
   const first = createRelationshipStore({ indexedDB });
   const second = createRelationshipStore({ indexedDB });
@@ -376,7 +403,7 @@ test("concurrent batches merge independent directions and replace rather than un
   await second.commit(batch(available(["stale"], 1)));
   assert.deepEqual(
     (await first.read(query)).relationships.alice.friends.members,
-    ["bob", "carol"],
+    ["stale"],
   );
   await second.commit(batch(available(["bob"], 3)));
   const result = await first.read(query);

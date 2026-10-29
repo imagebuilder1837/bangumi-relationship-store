@@ -214,7 +214,7 @@ export function createRelationshipStore({ indexedDB }) {
       );
     },
     /**
-     * Validate and detach input, then atomically merge by observation time.
+     * Validate and detach input, then atomically replace the requested records.
      * Resolve only on transaction completion; reject with the signal reason
      * on cancellation, otherwise a RelationshipStoreError with a stable code.
      * @param {Batch} batch
@@ -226,20 +226,11 @@ export function createRelationshipStore({ indexedDB }) {
       return transact(
         indexedDB,
         "readwrite",
-        (transaction, fail) => {
-          const merge = (name, key, value) => {
-            const store = transaction.objectStore(name);
-            readRecord(
-              store,
-              key,
-              (previous) => {
-                if (!previous || value.fetchedAt >= previous.fetchedAt)
-                  store.put({ version: 1, value }, key);
-              },
-              fail,
-            );
-          };
-          for (const { name, key, value } of entries) merge(name, key, value);
+        (transaction) => {
+          for (const { name, key, value } of entries) {
+            signal?.throwIfAborted();
+            transaction.objectStore(name).put({ version: 1, value }, key);
+          }
         },
         signal,
       );
